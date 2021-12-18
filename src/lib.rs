@@ -1,14 +1,46 @@
-use recap::Recap;
-use serde::Deserialize;
 use serde_json::Value::{self, Array, Bool, Null, Number, Object, String};
-use std::ops;
+use std::{num::NonZeroIsize, ops, str};
+use thiserror::Error;
 
-#[derive(Debug, Default, Deserialize, Recap, PartialEq, Eq, Hash, Clone, Copy)]
-#[recap(regex = r#"^(?P<start>-?\d+)?:(?P<end>-?\d+)?(:(?P<step>-?\d+)?)?$"#)]
+#[derive(Debug, Default, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct JMESSlice {
     pub start: Option<isize>,
     pub end: Option<isize>,
-    pub step: Option<isize>,
+    pub step: Option<NonZeroIsize>,
+}
+
+#[derive(Debug, Error, PartialEq, Eq, Hash, Clone, Copy)]
+pub enum ParseJMESSliceError {
+    #[error("Invalid format")]
+    InvalidFormat,
+    #[error("Step not allowed to be Zero")]
+    StepNotAllowedToBeZero,
+}
+
+impl str::FromStr for JMESSlice {
+    type Err = ParseJMESSliceError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use ParseJMESSliceError::{InvalidFormat, StepNotAllowedToBeZero};
+        let (_whole, start, end, _colon, step) = lazy_regex::regex_captures!(
+            r"^(?P<start>-?\d+)?:(?P<end>-?\d+)?(:(?P<step>-?\d+)?)?$",
+            s
+        )
+        .ok_or(InvalidFormat)?;
+        let option_isize = |s| match s {
+            "" => None,
+            s => Some(s.parse::<isize>().expect("Regex ensures valid")),
+        };
+        let ok = Self {
+            start: option_isize(start),
+            end: option_isize(end),
+            step: match option_isize(step) {
+                Some(i) => Some(NonZeroIsize::new(i).ok_or(StepNotAllowedToBeZero)?),
+                None => None,
+            },
+        };
+        Ok(ok)
+    }
 }
 
 impl From<ops::Range<isize>> for JMESSlice {
@@ -37,10 +69,14 @@ impl From<ops::RangeTo<isize>> for JMESSlice {
     }
 }
 
-pub trait JMESPath {
+pub trait JMESPath: Sized {
     fn identify(self, key: impl AsRef<str>) -> Self;
     fn index(self, index: isize) -> Self;
     fn slice(self, slice: impl Into<JMESSlice>) -> Self;
+    fn list_project(self, projection: impl Fn(Self) -> Self) -> Self;
+    fn slice_project(self, slice: impl Into<JMESSlice>, projection: impl Fn(Self) -> Self) -> Self;
+    fn object_project(self, projection: impl Fn(Self) -> Self) -> Self;
+    fn flatten_project(self, projection: impl Fn(Self) -> Self) -> Self;
 }
 
 /// If index is negative, calculate the index from the back of the vec
@@ -82,14 +118,91 @@ impl JMESPath for Value {
     }
 
     fn slice(self, slice: impl Into<JMESSlice>) -> Self {
+        let slice: JMESSlice = slice.into();
         match self {
             Array(vec) => {
-                let slice: JMESSlice = slice.into();
                 let start = match slice.start {
-                    Some(index) => index_from_rear!(vec, index),
-                    None => todo!(),
+                    // If a negative start position is given, it is calculated as the total length of the array plus the given start position.
+                    Some(i) => index_from_rear!(vec, i),
+                    // If no start position is given, it is assumed to be 0 if the given step is greater than 0 or the end of the array if the given step is less than 0.
+                    None => match slice.step {
+                        Some(step) if isize::from(step).is_negative() => match vec.is_empty() {
+                            true => return Null,
+                            false => vec.len() - 1,
+                        },
+                        _ => 0,
+                    },
                 };
-                todo!()
+                let stop = match slice.end {
+                    // If a negative stop position is given, it is calculated as the total length of the array plus the given stop position.
+                    Some(i) => index_from_rear!(vec, i),
+                    // If no stop position is given, it is assumed to be the length of the array if the given step is greater than 0 or 0 if the given step is less than 0.
+                    None => match slice.step {
+                        Some(step) if isize::from(step).is_negative() => 0,
+                        _ => vec.len(),
+                    },
+                };
+                // If the given step is omitted, it it assumed to be 1.
+                let step = slice.step.map(isize::from).unwrap_or(1);
+                let selected =
+                    num::range_step(start.try_into().unwrap(), stop.try_into().unwrap(), step)
+                        .filter_map(|index| {
+                            vec.get(usize::try_from(index).unwrap()).map(|v| v.clone())
+                        })
+                        .collect();
+                Array(selected)
+            }
+            _ => Null,
+        }
+    }
+
+    fn list_project(self, projection: impl Fn(Self) -> Self) -> Self {
+        match self {
+            Array(vec) => Array(
+                vec.into_iter()
+                    .map(projection)
+                    .filter(|value| !value.is_null())
+                    .collect(),
+            ),
+            _ => Null,
+        }
+    }
+
+    fn slice_project(self, slice: impl Into<JMESSlice>, projection: impl Fn(Self) -> Self) -> Self {
+        match self {
+            Array(_) => self.slice(slice).list_project(projection),
+            _ => Null,
+        }
+    }
+
+    fn object_project(self, projection: impl Fn(Self) -> Self) -> Self {
+        match self {
+            Object(map) => Array(
+                map.into_iter()
+                    .map(|(_key, value)| value)
+                    .map(projection)
+                    .filter(|value| !value.is_null())
+                    .collect(),
+            ),
+            _ => Null,
+        }
+    }
+
+    fn flatten_project(self, projection: impl Fn(Self) -> Self) -> Self {
+        match self {
+            Array(vec) => {
+                let mut results = Vec::new();
+                for result in vec.into_iter().map(projection) {
+                    match result {
+                        Array(inner) => {
+                            for inner_result in inner {
+                                results.push(inner_result)
+                            }
+                        }
+                        other => results.push(other),
+                    }
+                }
+                Array(results)
             }
             _ => Null,
         }
@@ -107,19 +220,6 @@ mod tests {
     fn nested_map() -> Value {
         json!({"a": {"b": {"c": {"d": "value"}}}})
     }
-    fn array() -> Value {
-        json!(["a", "b", "c", "d", "e", "f"])
-    }
-    fn complex() -> Value {
-        json!({"a": {
-          "b": {
-            "c": [
-              {"d": [0, [1, 2]]},
-              {"d": [3, 4]}
-            ]
-          }
-        }})
-    }
 
     #[test]
     fn identifier() {
@@ -134,6 +234,9 @@ mod tests {
             json!("value")
         )
     }
+    fn array() -> Value {
+        json!(["a", "b", "c", "d", "e", "f"])
+    }
 
     #[test]
     fn index() {
@@ -141,6 +244,17 @@ mod tests {
         assert_eq!(array().index(-1), json!("f"));
         assert_eq!(array().index(10), json!(null));
         assert_eq!(array().index(-10), json!(null));
+    }
+
+    fn complex() -> Value {
+        json!({"a": {
+          "b": {
+            "c": [
+              {"d": [0, [1, 2]]},
+              {"d": [3, 4]}
+            ]
+          }
+        }})
     }
 
     #[test]
@@ -173,8 +287,156 @@ mod tests {
             Ok(JMESSlice {
                 start: None,
                 end: None,
-                step: Some(10)
+                step: Some(NonZeroIsize::new(10).unwrap())
             })
         );
+        let res = "::0".parse::<JMESSlice>();
+        assert_eq!(res, Err(ParseJMESSliceError::StepNotAllowedToBeZero));
+    }
+
+    fn slice_example() -> Value {
+        json!([0, 1, 2, 3])
+    }
+    #[test]
+    fn slicing() -> anyhow::Result<()> {
+        assert_eq!(
+            slice_example().slice("0:4:1".parse::<JMESSlice>()?),
+            json!([0, 1, 2, 3])
+        );
+        assert_eq!(
+            slice_example().slice("0:4".parse::<JMESSlice>()?),
+            json!([0, 1, 2, 3])
+        );
+        assert_eq!(
+            slice_example().slice("0:3".parse::<JMESSlice>()?),
+            json!([0, 1, 2])
+        );
+        assert_eq!(
+            slice_example().slice(":2".parse::<JMESSlice>()?),
+            json!([0, 1])
+        );
+        assert_eq!(
+            slice_example().slice("::2".parse::<JMESSlice>()?),
+            json!([0, 2])
+        );
+        assert_eq!(
+            slice_example().slice("::-1".parse::<JMESSlice>()?),
+            json!([3, 2, 1, 0]),
+            "TODO: implement sound slicing"
+        );
+        assert_eq!(
+            slice_example().slice("-2:".parse::<JMESSlice>()?),
+            json!([2, 3])
+        );
+        Ok(())
+    }
+
+    fn list_project_example() -> Value {
+        json!({
+          "people": [
+            {"first": "James", "last": "d"},
+            {"first": "Jacob", "last": "e"},
+            {"first": "Jayden", "last": "f"},
+            {"missing": "different"}
+          ],
+          "foo": {"bar": "baz"}
+        })
+    }
+
+    #[test]
+    fn list_projection() {
+        assert_eq!(
+            list_project_example()
+                .identify("people")
+                .list_project(|v| v.identify("first")),
+            json!(["James", "Jacob", "Jayden"])
+        );
+    }
+
+    #[test]
+    fn slice_projection() {
+        assert_eq!(
+            list_project_example()
+                .identify("people")
+                .slice_project(":2".parse::<JMESSlice>().unwrap(), |v| v.identify("first")),
+            json!(["James", "Jacob"])
+        );
+    }
+
+    fn object_projection_example() -> Value {
+        json!({
+          "ops": {
+            "functionA": {"numArgs": 2},
+            "functionB": {"numArgs": 3},
+            "functionC": {"variadic": true}
+          }
+        })
+    }
+
+    #[test]
+    fn object_projection() {
+        assert_eq!(
+            object_projection_example()
+                .identify("ops")
+                .object_project(|v| v.identify("numArgs")),
+            json!([2, 3])
+        )
+    }
+
+    fn flatten_projection_example() -> Value {
+        json!({
+          "reservations": [
+            {
+              "instances": [
+                {"state": "running"},
+                {"state": "stopped"}
+              ]
+            },
+            {
+              "instances": [
+                {"state": "terminated"},
+                {"state": "running"}
+              ]
+            }
+          ]
+        })
+    }
+
+    #[test]
+    fn flatten_projection() {
+        assert_eq!(
+            flatten_projection_example()
+                .identify("reservations")
+                .list_project(|v| v
+                    .identify("instances")
+                    .list_project(|v| v.identify("state"))),
+            json!([["running", "stopped"], ["terminated", "running"]])
+        );
+        assert_eq!(
+            flatten_projection_example()
+                .identify("reservations")
+                .list_project(|v| v
+                    .identify("instances")
+                    .flatten_project(|v| v.identify("state"))),
+            json!(["running", "stopped", "terminated", "running"]),
+            "TODO sound flattening"
+        );
+    }
+
+    fn nested_list_example() -> Value {
+        json!([[0, 1], 2, [3], 4, [5, [6, 7]]])
+    }
+
+    #[test]
+    fn flatten_project_nested_list() {
+        assert_eq!(
+            nested_list_example().flatten_project(|v| v),
+            json!([0, 1, 2, 3, 4, 5, [6, 7]])
+        );
+        assert_eq!(
+            nested_list_example().flatten_project(|v| v.flatten_project(|v| v)),
+            json!([0, 1, 2, 3, 4, 5, 6, 7]),
+            "TODO sound flattening"
+        )
     }
 }
