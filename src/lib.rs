@@ -1,3 +1,4 @@
+use num::Zero;
 use serde_json::Value::{self, Array, Bool, Null, Number, Object, String};
 use std::{num::NonZeroIsize, ops, str};
 use thiserror::Error;
@@ -77,22 +78,7 @@ pub trait JMESPath: Sized {
     fn slice_project(self, slice: impl Into<JMESSlice>, projection: impl Fn(Self) -> Self) -> Self;
     fn object_project(self, projection: impl Fn(Self) -> Self) -> Self;
     fn flatten_project(self, projection: impl Fn(Self) -> Self) -> Self;
-}
-
-/// If index is negative, calculate the index from the back of the vec
-/// Bail if index is too negative
-macro_rules! index_from_rear {
-    ($vec:expr, $index:expr) => {{
-        if $index.is_negative() {
-            // Get the index from the back
-            match $vec.len().checked_sub($index.unsigned_abs()) {
-                Some(u) => u,
-                None => return Null,
-            }
-        } else {
-            $index.unsigned_abs() // Positive or 0
-        }
-    }};
+    // fn filter(self, )
 }
 
 impl JMESPath for Value {
@@ -106,7 +92,15 @@ impl JMESPath for Value {
     fn index(self, index: isize) -> Self {
         match self {
             Array(mut vec) => {
-                let index = index_from_rear!(vec, index);
+                let index = if index.is_negative() {
+                    // Get the index from the back
+                    match vec.len().checked_sub(index.unsigned_abs()) {
+                        Some(u) => u,
+                        None => return Null,
+                    }
+                } else {
+                    index.unsigned_abs()
+                };
                 if index < vec.len() {
                     vec.remove(index)
                 } else {
@@ -118,39 +112,24 @@ impl JMESPath for Value {
     }
 
     fn slice(self, slice: impl Into<JMESSlice>) -> Self {
+        use slyce::{Index, Slice}; // Slicing makes my head hurt, use a library
         let slice: JMESSlice = slice.into();
         match self {
             Array(vec) => {
-                let start = match slice.start {
-                    // If a negative start position is given, it is calculated as the total length of the array plus the given start position.
-                    Some(i) => index_from_rear!(vec, i),
-                    // If no start position is given, it is assumed to be 0 if the given step is greater than 0 or the end of the array if the given step is less than 0.
-                    None => match slice.step {
-                        Some(step) if isize::from(step).is_negative() => match vec.is_empty() {
-                            true => return Null,
-                            false => vec.len() - 1,
-                        },
-                        _ => 0,
+                let op = Slice {
+                    start: match slice.start {
+                        Some(i) if i.is_negative() => Index::Tail(i.unsigned_abs()),
+                        Some(i) => Index::Head(i.unsigned_abs()),
+                        None => Index::Default,
                     },
-                };
-                let stop = match slice.end {
-                    // If a negative stop position is given, it is calculated as the total length of the array plus the given stop position.
-                    Some(i) => index_from_rear!(vec, i),
-                    // If no stop position is given, it is assumed to be the length of the array if the given step is greater than 0 or 0 if the given step is less than 0.
-                    None => match slice.step {
-                        Some(step) if isize::from(step).is_negative() => 0,
-                        _ => vec.len(),
+                    end: match slice.end {
+                        Some(i) if i.is_negative() => Index::Tail(i.unsigned_abs()),
+                        Some(i) => Index::Head(i.unsigned_abs()),
+                        None => Index::Default,
                     },
+                    step: slice.step.map(isize::from),
                 };
-                // If the given step is omitted, it it assumed to be 1.
-                let step = slice.step.map(isize::from).unwrap_or(1);
-                let selected =
-                    num::range_step(start.try_into().unwrap(), stop.try_into().unwrap(), step)
-                        .filter_map(|index| {
-                            vec.get(usize::try_from(index).unwrap()).map(|v| v.clone())
-                        })
-                        .collect();
-                Array(selected)
+                Array(op.apply(&vec).map(Clone::clone).collect())
             }
             _ => Null,
         }
