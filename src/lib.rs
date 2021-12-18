@@ -78,6 +78,7 @@ pub trait JMESPath: Sized {
     fn slice_project(self, slice: impl Into<JMESSlice>, projection: impl Fn(Self) -> Self) -> Self;
     fn object_project(self, projection: impl Fn(Self) -> Self) -> Self;
     fn flatten(self) -> Self;
+    fn flatten_project(self, projection: impl Fn(Self) -> Self) -> Self;
 }
 
 impl JMESPath for Value {
@@ -177,6 +178,29 @@ impl JMESPath for Value {
                     }
                 }
                 Array(results)
+            }
+            _ => Null,
+        }
+    }
+
+    fn flatten_project(self, projection: impl Fn(Self) -> Self) -> Self {
+        match self {
+            // This is the LHS
+            Array(current) => {
+                // Create an empty result list.
+                let mut results = Vec::new();
+                // Iterate over the elements of the current result.
+                for element in current {
+                    match element {
+                        // If the current element is a list, add each element of the current element to the end of the result list.
+                        Array(mut a_list) => results.append(&mut a_list),
+                        // If the current element is not a list, add to the end of the result list.
+                        other => results.push(other),
+                    }
+                }
+                // The result list is now the new current result.
+                // Once the flattening operation has been performed, subsequent operations are projected onto the flattened list with the same semantics as a wildcard expression. Thus the difference between [*] and [] is that [] will first flatten sublists in the current result.
+                Array(results).list_project(projection)
             }
             _ => Null,
         }
@@ -386,16 +410,16 @@ mod tests {
                 .identify("reservations")
                 .list_project(|v| v
                     .identify("instances")
-                    .list_project(|v| v.identify("state"))),
+                    .list_project(|v| v.identify("state"))), // reservations[*].instances[*].state
             json!([["running", "stopped"], ["terminated", "running"]])
         );
         assert_eq!(
             flatten_projection_example()
                 .identify("reservations")
-                .flatten()
-                .list_project(|v| v.identify("instances")),
+                .list_project(|v| v
+                    .identify("instances")
+                    .flatten_project(|v| v.identify("state"))), // reservations[*].instances[].state
             json!(["running", "stopped", "terminated", "running"]),
-            "TODO sound flattening"
         );
     }
 
