@@ -77,8 +77,7 @@ pub trait JMESPath: Sized {
     fn list_project(self, projection: impl Fn(Self) -> Self) -> Self;
     fn slice_project(self, slice: impl Into<JMESSlice>, projection: impl Fn(Self) -> Self) -> Self;
     fn object_project(self, projection: impl Fn(Self) -> Self) -> Self;
-    fn flatten_project(self, projection: impl Fn(Self) -> Self) -> Self;
-    // fn filter(self, )
+    fn flatten(self) -> Self;
 }
 
 impl JMESPath for Value {
@@ -167,17 +166,13 @@ impl JMESPath for Value {
         }
     }
 
-    fn flatten_project(self, projection: impl Fn(Self) -> Self) -> Self {
+    fn flatten(self) -> Self {
         match self {
             Array(vec) => {
                 let mut results = Vec::new();
-                for result in vec.into_iter().map(projection) {
+                for result in vec.into_iter() {
                     match result {
-                        Array(inner) => {
-                            for inner_result in inner {
-                                results.push(inner_result)
-                            }
-                        }
+                        Array(mut inner) => results.append(&mut inner),
                         other => results.push(other),
                     }
                 }
@@ -301,11 +296,14 @@ mod tests {
         assert_eq!(
             slice_example().slice("::-1".parse::<JMESSlice>()?),
             json!([3, 2, 1, 0]),
-            "TODO: implement sound slicing"
         );
         assert_eq!(
             slice_example().slice("-2:".parse::<JMESSlice>()?),
             json!([2, 3])
+        );
+        assert_eq!(
+            slice_example().slice("100::-1".parse::<JMESSlice>()?),
+            json!([3, 2, 1, 0])
         );
         Ok(())
     }
@@ -394,9 +392,8 @@ mod tests {
         assert_eq!(
             flatten_projection_example()
                 .identify("reservations")
-                .list_project(|v| v
-                    .identify("instances")
-                    .flatten_project(|v| v.identify("state"))),
+                .flatten()
+                .list_project(|v| v.identify("instances")),
             json!(["running", "stopped", "terminated", "running"]),
             "TODO sound flattening"
         );
@@ -409,13 +406,12 @@ mod tests {
     #[test]
     fn flatten_project_nested_list() {
         assert_eq!(
-            nested_list_example().flatten_project(|v| v),
+            nested_list_example().flatten(),
             json!([0, 1, 2, 3, 4, 5, [6, 7]])
         );
         assert_eq!(
-            nested_list_example().flatten_project(|v| v.flatten_project(|v| v)),
+            nested_list_example().flatten().flatten(),
             json!([0, 1, 2, 3, 4, 5, 6, 7]),
-            "TODO sound flattening"
         )
     }
 }
