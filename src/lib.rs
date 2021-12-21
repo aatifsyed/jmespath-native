@@ -1,5 +1,4 @@
-use num::Zero;
-use serde_json::Value::{self, Array, Bool, Null, Number, Object, String};
+use serde_json::Value::{self, Array, Null, Object};
 use std::{num::NonZeroIsize, ops, str};
 use thiserror::Error;
 
@@ -184,6 +183,7 @@ impl JMESPath for Value {
     }
 
     fn flatten_project(self, projection: impl Fn(Self) -> Self) -> Self {
+        println!("self = {:?}", self);
         match self {
             // This is the LHS
             Array(current) => {
@@ -200,6 +200,7 @@ impl JMESPath for Value {
                 }
                 // The result list is now the new current result.
                 // Once the flattening operation has been performed, subsequent operations are projected onto the flattened list with the same semantics as a wildcard expression. Thus the difference between [*] and [] is that [] will first flatten sublists in the current result.
+                println!("results = {:?}", results);
                 Array(results).list_project(projection)
             }
             _ => Null,
@@ -430,12 +431,64 @@ mod tests {
     #[test]
     fn flatten_project_nested_list() {
         assert_eq!(
-            nested_list_example().flatten(),
+            nested_list_example().flatten_project(|v| v),
             json!([0, 1, 2, 3, 4, 5, [6, 7]])
         );
         assert_eq!(
-            nested_list_example().flatten().flatten(),
+            nested_list_example()
+                .flatten_project(|v| v)
+                .flatten_project(|v| v), // Why isn't this nested?
             json!([0, 1, 2, 3, 4, 5, 6, 7]),
         )
     }
+
+    fn objects_in_nested_list() -> Value {
+        json!([
+            {"name": "Seattle", "state": "WA"},
+            {"name": "New York", "state": "NY"},
+            [
+                {"name": "Bellevue", "state": "WA"},
+                {"name": "Olympia", "state": "WA"}
+            ]
+        ])
+    }
+
+    #[test]
+    fn test_flatten_objects_in_nested_list() {
+        assert_eq!(
+            objects_in_nested_list().flatten_project(|v| v.identify("name")),
+            json!(["Seattle", "New York", "Bellevue", "Olympia"])
+        )
+    }
+
+    #[test]
+    fn running() {
+        let program = JMESProgram::new("hello.world").unwrap();
+        assert_eq!(program.run(json!({"hello":{"world": 1}})), json!(1))
+    }
 }
+
+/// Only supports identify at the moment
+// TODO pest etc
+#[derive(Debug, Clone)]
+pub struct JMESProgram(String);
+
+impl JMESProgram {
+    pub fn new(program: impl AsRef<str>) -> anyhow::Result<Self> {
+        Ok(Self(program.as_ref().into()))
+    }
+
+    pub fn run(&self, mut input: Value) -> Value {
+        for path in self.0.split('.') {
+            input = input.identify(path)
+        }
+        input
+    }
+}
+
+// impl Fn(Value) -> Value for JMESProgram {
+//     extern "rust-call" fn call(&self, args: Args) -> Self::Output {
+//         todo!()
+//     }
+// }
+// Could also compile as Box<dyn Fn(Value) -> Value>
