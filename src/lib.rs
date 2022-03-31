@@ -1,7 +1,7 @@
 use serde_json::Value::{self, Array, Null, Object};
 use std::{num::NonZeroIsize, ops, str};
 use thiserror::Error;
-
+mod ast;
 #[derive(Debug, Default, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct JMESSlice {
     pub start: Option<isize>,
@@ -76,6 +76,7 @@ pub trait JMESPath: Sized {
     fn list_project(self, projection: impl Fn(Self) -> Self) -> Self;
     fn slice_project(self, slice: impl Into<JMESSlice>, projection: impl Fn(Self) -> Self) -> Self;
     fn object_project(self, projection: impl Fn(Self) -> Self) -> Self;
+    #[deprecated]
     fn flatten(self) -> Self;
     fn flatten_project(self, projection: impl Fn(Self) -> Self) -> Self;
 }
